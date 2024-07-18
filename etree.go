@@ -31,9 +31,14 @@ var ErrXML = errors.New("etree: invalid XML format")
 var cdataPrefix = []byte("<![CDATA[")
 
 // ReadSettings determine the default behavior of the Document's ReadFrom*
-// methods.
+// functions.
 type ReadSettings struct {
-	// CharsetReader to be passed to standard xml.Decoder. Default: nil.
+	// CharsetReader, if non-nil, defines a function to generate
+	// charset-conversion readers, converting from the provided non-UTF-8
+	// charset into UTF-8. If nil, the ReadFrom* functions will use a
+	// "pass-through" CharsetReader that performs no conversion on the reader's
+	// data regardless of the value of the "charset" encoding string. Default:
+	// nil.
 	CharsetReader func(charset string, input io.Reader) (io.Reader, error)
 
 	// Permissive allows input containing common mistakes such as missing tags
@@ -50,11 +55,16 @@ type ReadSettings struct {
 	// preserve them instead of keeping only one. Default: false.
 	PreserveDuplicateAttrs bool
 
-	// ValidateInput forces all ReadFrom* methods to validate that the
-	// provided input is composed of well-formed XML before processing it. If
-	// invalid XML is detected, the ReadFrom* methods return an error. Because
-	// this option requires the input to be processed twice, it incurs a
+	// ValidateInput forces all ReadFrom* functions to validate that the
+	// provided input is composed of "well-formed"(*) XML before processing it.
+	// If invalid XML is detected, the ReadFrom* functions return an error.
+	// Because this option requires the input to be processed twice, it incurs a
 	// significant performance penalty. Default: false.
+	//
+	// (*) Note that this definition of "well-formed" is in the context of the
+	// go standard library's encoding/xml package. Go's encoding/xml package
+	// does not, in fact, guarantee well-formed XML as specified by the W3C XML
+	// recommendation. See: https://github.com/golang/go/issues/68299
 	ValidateInput bool
 
 	// Entity to be passed to standard xml.Decoder. Default: nil.
@@ -67,13 +77,11 @@ type ReadSettings struct {
 	AutoClose []string
 }
 
-// newReadSettings creates a default ReadSettings record.
-func newReadSettings() ReadSettings {
-	return ReadSettings{
-		CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
-			return input, nil
-		},
-	}
+// defaultCharsetReader is used by the xml decoder when the ReadSettings
+// CharsetReader value is nil. It behaves as a "pass-through", ignoring
+// the requested charset parameter and skipping conversion altogether.
+func defaultCharsetReader(charset string, input io.Reader) (io.Reader, error) {
+	return input, nil
 }
 
 // dup creates a duplicate of the ReadSettings object.
@@ -92,7 +100,7 @@ func (s *ReadSettings) dup() ReadSettings {
 	}
 }
 
-// WriteSettings determine the behavior of the Document's WriteTo* methods.
+// WriteSettings determine the behavior of the Document's WriteTo* functions.
 type WriteSettings struct {
 	// CanonicalEndTags forces the production of XML end tags, even for
 	// elements that have no child elements. Default: false.
@@ -105,7 +113,8 @@ type WriteSettings struct {
 
 	// CanonicalAttrVal forces the production of XML character references for
 	// attribute value characters &, < and ". If false, XML character
-	// references are also produced for > and '. Default: false.
+	// references are also produced for > and '. Ignored when AttrSingleQuote
+	// is true. Default: false.
 	CanonicalAttrVal bool
 
 	// AttrSingleQuote causes attributes to use single quotes (attr='example')
@@ -113,7 +122,7 @@ type WriteSettings struct {
 	// false.
 	AttrSingleQuote bool
 
-	// UseCRLF causes the document's Indent* methods to use a carriage return
+	// UseCRLF causes the document's Indent* functions to use a carriage return
 	// followed by a linefeed ("\r\n") when outputting a newline. If false,
 	// only a linefeed is used ("\n"). Default: false.
 	//
@@ -121,23 +130,12 @@ type WriteSettings struct {
 	UseCRLF bool
 }
 
-// newWriteSettings creates a default WriteSettings record.
-func newWriteSettings() WriteSettings {
-	return WriteSettings{
-		CanonicalEndTags: false,
-		CanonicalText:    false,
-		CanonicalAttrVal: false,
-		AttrSingleQuote:  false,
-		UseCRLF:          false,
-	}
-}
-
 // dup creates a duplicate of the WriteSettings object.
 func (s *WriteSettings) dup() WriteSettings {
 	return *s
 }
 
-// IndentSettings determine the behavior of the Document's Indent* methods.
+// IndentSettings determine the behavior of the Document's Indent* functions.
 type IndentSettings struct {
 	// Spaces indicates the number of spaces to insert for each level of
 	// indentation. Set to etree.NoIndent to remove all indentation. Ignored
@@ -153,7 +151,7 @@ type IndentSettings struct {
 	// for a newline ("\n"). Default: false.
 	UseCRLF bool
 
-	// PreserveLeafWhitespace causes indent methods to preserve whitespace
+	// PreserveLeafWhitespace causes indent functions to preserve whitespace
 	// within XML elements containing only non-CDATA character data. Default:
 	// false.
 	PreserveLeafWhitespace bool
@@ -195,7 +193,7 @@ func getIndentFunc(s *IndentSettings) indentFunc {
 	}
 }
 
-// Writer is the interface that wraps the Write* methods called by each token
+// Writer is the interface that wraps the Write* functions called by each token
 // type's WriteTo function.
 type Writer interface {
 	io.StringWriter
@@ -260,7 +258,7 @@ const (
 
 // CharData may be used to represent simple text data or a CDATA section
 // within an XML document. The Data property should never be modified
-// directly; use the SetData method instead.
+// directly; use the SetData function instead.
 type CharData struct {
 	Data   string // the simple text or CDATA section content
 	parent *Element
@@ -293,9 +291,7 @@ type ProcInst struct {
 // NewDocument creates an XML document without a root element.
 func NewDocument() *Document {
 	return &Document{
-		Element:       Element{Child: make([]Token, 0)},
-		ReadSettings:  newReadSettings(),
-		WriteSettings: newWriteSettings(),
+		Element: Element{Child: make([]Token, 0)},
 	}
 }
 
@@ -428,6 +424,9 @@ func validateXML(r io.Reader, settings ReadSettings) error {
 func newDecoder(r io.Reader, settings ReadSettings) *xml.Decoder {
 	d := xml.NewDecoder(r)
 	d.CharsetReader = settings.CharsetReader
+	if d.CharsetReader == nil {
+		d.CharsetReader = defaultCharsetReader
+	}
 	d.Strict = !settings.Permissive
 	d.Entity = settings.Entity
 	d.AutoClose = settings.AutoClose
@@ -889,6 +888,7 @@ func (e *Element) readFrom(ri io.Reader, settings ReadSettings) (n int64, err er
 		r = newXmlSimpleReader(ri)
 	}
 
+	attrCheck := make(map[xml.Name]int)
 	dec := newDecoder(r, settings)
 
 	var stack stack[*Element]
@@ -921,8 +921,19 @@ func (e *Element) readFrom(ri io.Reader, settings ReadSettings) (n int64, err er
 		switch t := t.(type) {
 		case xml.StartElement:
 			e := newElement(t.Name.Space, t.Name.Local, top)
-			for _, a := range t.Attr {
-				e.createAttr(a.Name.Space, a.Name.Local, a.Value, e, settings.PreserveDuplicateAttrs)
+			if settings.PreserveDuplicateAttrs || len(t.Attr) < 2 {
+				for _, a := range t.Attr {
+					e.addAttr(a.Name.Space, a.Name.Local, a.Value)
+				}
+			} else {
+				for _, a := range t.Attr {
+					if i, contains := attrCheck[a.Name]; contains {
+						e.Attr[i].Value = a.Value
+					} else {
+						attrCheck[a.Name] = e.addAttr(a.Name.Space, a.Name.Local, a.Value)
+					}
+				}
+				clear(attrCheck)
 			}
 			stack.push(e)
 		case xml.EndElement:
@@ -1365,28 +1376,29 @@ func (e *Element) addChild(t Token) {
 // prefix followed by a colon.
 func (e *Element) CreateAttr(key, value string) *Attr {
 	space, skey := spaceDecompose(key)
-	return e.createAttr(space, skey, value, e, false)
-}
 
-// createAttr is a helper function that creates attributes.
-func (e *Element) createAttr(space, key, value string, parent *Element, preserveDups bool) *Attr {
-	if !preserveDups {
-		for i, a := range e.Attr {
-			if space == a.Space && key == a.Key {
-				e.Attr[i].Value = value
-				return &e.Attr[i]
-			}
+	for i, a := range e.Attr {
+		if space == a.Space && skey == a.Key {
+			e.Attr[i].Value = value
+			return &e.Attr[i]
 		}
 	}
 
+	i := e.addAttr(space, skey, value)
+	return &e.Attr[i]
+}
+
+// addAttr is a helper function that adds an attribute to an element. Returns
+// the index of the added attribute.
+func (e *Element) addAttr(space, key, value string) int {
 	a := Attr{
 		Space:   space,
 		Key:     key,
 		Value:   value,
-		element: parent,
+		element: e,
 	}
 	e.Attr = append(e.Attr, a)
-	return &e.Attr[len(e.Attr)-1]
+	return len(e.Attr) - 1
 }
 
 // RemoveAttr removes the first attribute of this element whose key matches
@@ -1452,7 +1464,7 @@ func (a *Attr) WriteTo(w Writer, s *WriteSettings) {
 		w.WriteString(`="`)
 	}
 	var m escapeMode
-	if s.CanonicalAttrVal {
+	if s.CanonicalAttrVal && !s.AttrSingleQuote {
 		m = escapeCanonicalAttr
 	} else {
 		m = escapeNormal

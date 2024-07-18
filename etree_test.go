@@ -257,16 +257,14 @@ func TestDocumentCharsetReader(t *testing.T) {
 	</Book>
 </Store>`
 
-	charsetLabel := ""
 	doc := newDocumentFromString2(t, s, ReadSettings{
 		CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
-			charsetLabel = label
-			return &lowercaseCharsetReader{input}, nil
+			if label == "lowercase" {
+				return &lowercaseCharsetReader{input}, nil
+			}
+			return nil, errors.New("unknown charset")
 		},
 	})
-	if charsetLabel != "lowercase" {
-		t.Fatalf("etree: incorrect charset encoding, expected lowercase, got %s", charsetLabel)
-	}
 
 	cases := []struct {
 		path string
@@ -772,9 +770,13 @@ func TestSortAttrs(t *testing.T) {
 	checkStrEq(t, out, `<el AAA="1" Foo="2" a01="3" aaa="4" foo="5" z="6" สวัสดี="7" a:AAA="8" a:ZZZ="9"/>`+"\n")
 }
 
-func TestCharsetReaderEncoding(t *testing.T) {
+func TestCharsetReaderDefaultSetting(t *testing.T) {
+	// Test encodings where the default pass-through charset conversion
+	// should work for common single-byte character encodings.
 	cases := []string{
+		`<?xml version="1.0"?><foo></foo>`,
 		`<?xml version="1.0" encoding="ISO-8859-1"?><foo></foo>`,
+		`<?xml version="1.0" encoding="Windows-1252"?><foo></foo>`,
 		`<?xml version="1.0" encoding="UTF-8"?><foo></foo>`,
 		`<?xml version="1.0" encoding="US-ASCII"?><foo></foo>`,
 	}
@@ -1467,7 +1469,7 @@ func TestReindexChildren(t *testing.T) {
 }
 
 func TestPreserveDuplicateAttrs(t *testing.T) {
-	s := `<element attr="test" attr="test2"/>`
+	s := `<element x="value1" y="value2" x="value3" x="value4" y="value5"/>`
 
 	checkAttrCount := func(e *Element, n int) {
 		if len(e.Attr) != n {
@@ -1490,23 +1492,20 @@ func TestPreserveDuplicateAttrs(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
 		doc := newDocumentFromString2(t, s, ReadSettings{PreserveDuplicateAttrs: true})
 		e := doc.FindElement("element")
-		checkAttrCount(e, 2)
-		checkAttr(e, 0, "attr", "test")
-		checkAttr(e, 1, "attr", "test2")
+		checkAttrCount(e, 5)
+		checkAttr(e, 0, "x", "value1")
+		checkAttr(e, 1, "y", "value2")
+		checkAttr(e, 2, "x", "value3")
+		checkAttr(e, 3, "x", "value4")
+		checkAttr(e, 4, "y", "value5")
 	})
 
 	t.Run("disabled", func(t *testing.T) {
-		doc := newDocumentFromString2(t, s, ReadSettings{PreserveDuplicateAttrs: false})
+		doc := newDocumentFromString2(t, s, ReadSettings{})
 		e := doc.FindElement("element")
-		checkAttrCount(e, 1)
-		checkAttr(e, 0, "attr", "test2")
-	})
-
-	t.Run("default", func(t *testing.T) {
-		doc := newDocumentFromString(t, s)
-		e := doc.FindElement("element")
-		checkAttrCount(e, 1)
-		checkAttr(e, 0, "attr", "test2")
+		checkAttrCount(e, 2)
+		checkAttr(e, 0, "x", "value4")
+		checkAttr(e, 1, "y", "value5")
 	})
 }
 
